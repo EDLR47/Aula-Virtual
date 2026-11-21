@@ -1,0 +1,28 @@
+<main class="login-container">
+    <form [formGroup]="loginForm" (ngSubmit)="onSubmit()">
+        <h1>Aula Virtual</h1>
+        <p>Ingresa a tu cuenta</p>
+
+        <label for="usuario">Usuario</label>
+        <input id="usuario" type="text" autocomplete="username" formControlName="usuario" />
+
+        @if (loginForm.controls.usuario.touched && loginForm.controls.usuario.invalid){
+            <small>El usuario es obligatorio.</small>
+        }
+
+        <label for="contrasena">Contraseña</label>
+        <input id="contrasena" type="password" autocomplete="current-password" formControlName="contrasena" />
+
+        @if (loginForm.controls.contrasena.touched && loginForm.controls.contrasena.invalid){
+            <small>La contraseña es obligatoria.</small>
+        }
+
+        @if(errorMessage()){
+            <p class="error">{{errorMessage()}}</p>
+        }
+
+        <button type="submit">
+            {{ loading() ? 'Ingresando' : 'Iniciar sesión' }}
+        </button>
+    </form>
+</main>

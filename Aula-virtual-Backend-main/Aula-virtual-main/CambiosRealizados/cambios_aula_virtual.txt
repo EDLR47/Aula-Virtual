@@ -1,0 +1,238 @@
+=====================================================================
+ AULA VIRTUAL - RESUMEN DE CAMBIOS Y SOLUCION DEL ERROR DE /cursos
+=====================================================================
+Fecha: 21 de noviembre de 2026
+Proyecto: Aula-virtual (Backend: Spring Boot / Frontend: Angular)
+
+
+---------------------------------------------------------------------
+1. CONTEXTO
+---------------------------------------------------------------------
+Durante la clase anterior se presento un error que ni el profesor
+supo explicar: al iniciar sesion con el usuario cdzapata (contrasena
+12345), usar el token obtenido y consultar el endpoint GET /cursos,
+la respuesta no traia la informacion esperada.
+
+Stack del proyecto:
+  - Backend: Java 21, Spring Boot 4.1.1, Spring Security con JWT,
+    Spring Data JPA, base de datos H2 en memoria, Lombok y MapStruct.
+    Puerto 8080.
+  - Frontend: Angular 22. Puerto 4200.
+
+Como se ejecuta:
+  - Backend:  .\mvnw.cmd clean spring-boot:run   (Windows)
+              ./mvnw clean spring-boot:run       (Mac/Linux)
+  - Frontend: npm install  y luego  npm start
+
+
+---------------------------------------------------------------------
+2. QUE ESTABA PASANDO (DIAGNOSTICO)
+---------------------------------------------------------------------
+La captura de Swagger mostro que GET /cursos respondia 200 con una
+lista vacia: []. Eso descarta problemas de autenticacion (el token
+era valido) y apunta a los datos o a la consulta. Se encontraron
+las siguientes causas:
+
+CAUSA 1 - Faltaban datos de prueba (la que se vio en clase)
+  La clase InicializadorDatos solo creaba el usuario cdzapata y su
+  Persona. No existian Profesor, Estudiante ni Curso, asi que la
+  consulta no tenia nada que devolver y respondia [].
+
+CAUSA 2 - La consulta tenia joins implicitos
+  La consulta listarCursosPorUsuario usaba rutas como
+  e.persona.usuario.username dentro del WHERE. Hibernate las
+  convierte en INNER JOIN, lo que anula los LEFT JOIN y descarta
+  cursos que no tengan estudiantes (para el profesor) o que no
+  tengan profesor (para el estudiante).
+
+CAUSA 3 - Referencias circulares en los DTO (error oculto)
+  CursoDto exponia la entidad Profesor completa, que apunta a
+  Persona, que apunta a User, que vuelve a apuntar a Persona.
+  Al convertir a JSON se generaba un ciclo infinito (error 500).
+  Ademas, por ese camino se filtraba el hash de la contrasena.
+  Tambien existia el ciclo CursoDto -> EstudianteDto -> CursoDto,
+  que provocaba un StackOverflowError al mapear con MapStruct.
+  Este error no se veia porque, sin datos, nunca se ejecutaba.
+
+CAUSA 4 - Faltaba lombok-mapstruct-binding en el pom.xml
+  Sin esa dependencia, MapStruct puede no ver los getters que
+  genera Lombok y devolver DTO con todos los campos en null.
+
+CAUSA 5 - Relacion Profesor-Curso mal mapeada
+  Profesor.cursos era un @OneToMany sin mappedBy, mientras Curso ya
+  tenia @ManyToOne profesor. Hibernate creaba una tabla extra
+  (profesor_cursos) y guardaba el mismo vinculo en dos lugares sin
+  sincronizar.
+
+
+---------------------------------------------------------------------
+3. CAMBIOS REALIZADOS
+---------------------------------------------------------------------
+
+3.1 pom.xml
+  Se agrego lombok-mapstruct-binding en annotationProcessorPaths del
+  default-compile, entre Lombok y mapstruct-processor:
+
+    <path>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok-mapstruct-binding</artifactId>
+        <version>0.2.0</version>
+    </path>
+
+  Motivo: que MapStruct procese correctamente las clases de Lombok.
+
+3.2 Entidad Profesor
+  Antes:   @OneToMany
+           private List<Curso> cursos;
+  Despues: @OneToMany(mappedBy = "profesor")
+           private List<Curso> cursos;
+
+  Motivo: Curso es el lado dueno de la relacion. Se elimina la tabla
+  intermedia innecesaria y el dato queda guardado en un solo lugar.
+
+3.3 DTOs (carpeta dto)
+  Se crearon dos DTO nuevos y se reemplazaron dos existentes. Ya no
+  se exponen entidades JPA y se eliminan las referencias circulares.
+
+  PersonaDto (nuevo): id, nombres, apellidos, identificacion.
+    No incluye "usuario", asi que corta el ciclo y no filtra la
+    contrasena.
+  ProfesorDto (nuevo): id, persona (PersonaDto).
+    No incluye la lista de cursos.
+  EstudianteDto (modificado): id, codigo, persona (PersonaDto).
+    Se elimino la lista de cursos.
+  CursoDto (modificado): id, nombre, codigo, estudiantes
+    (List<EstudianteDto>), profesor (ProfesorDto).
+    Antes profesor era la entidad Profesor.
+
+3.4 CursoMapper
+  Se dejaron solo entityToDto y entityListToDtoList. Se elimino
+  dtoToEntity porque no se usaba y, con los DTO nuevos, generaria
+  advertencias de propiedades sin mapear. MapStruct genera
+  automaticamente los sub-mapeos de Persona, Profesor y Estudiante.
+
+3.5 CursoRepository - consulta con joins explicitos
+  Antes:
+    WHERE e.persona.usuario.username = :usuario
+       OR p.persona.usuario.username = :usuario
+
+  Despues:
+    SELECT DISTINCT c FROM Curso c
+      LEFT JOIN c.estudiantes e LEFT JOIN e.persona pe
+      LEFT JOIN pe.usuario ue
+      LEFT JOIN c.profesor p LEFT JOIN p.persona pp
+      LEFT JOIN pp.usuario up
+    WHERE ue.username = :usuario OR up.username = :usuario
+
+  Motivo: los LEFT JOIN explicitos no descartan cursos sin
+  estudiantes o sin profesor.
+
+3.6 Repositorios nuevos
+  Se crearon ProfesorRepository y EstudianteRepository (ambos
+  extienden JpaRepository<Entidad, Long>) en la carpeta
+  repositorios. Son necesarios para guardar los datos de prueba.
+
+3.7 InicializadorDatos - datos de prueba
+  Ahora, al arrancar, se crean:
+    - Usuario cdzapata / 12345  (rol ADMIN), Persona id 1, Profesor.
+    - Curso "Programacion" (codigo PRG101) asignado a cdzapata.
+    - Usuario ana / 12345 (rol ESTUDIANTE), Persona id 2, Estudiante
+      (codigo 1001) matriculada en ese curso.
+
+  Esto permite probar las dos ramas de la consulta: cdzapata como
+  profesor y ana como estudiante.
+
+
+---------------------------------------------------------------------
+4. COMO PROBAR
+---------------------------------------------------------------------
+1. Detener el backend (Ctrl + C en la terminal) y arrancarlo con
+   clean:  .\mvnw.cmd clean spring-boot:run
+   Esperar el mensaje "Started AulavirtualApplication".
+2. Abrir http://localhost:8080/swagger-ui.html
+3. POST /auth/login con:
+     {"usuario":"cdzapata","contrasena":"12345"}
+4. Copiar el token, pulsar Authorize y pegarlo.
+5. Ejecutar GET /cursos.
+
+Prueba B (estudiante): hacer Logout en Authorize, repetir el login
+con {"usuario":"ana","contrasena":"12345"}, autorizar con el token
+nuevo y ejecutar GET /cursos. Debe devolver el mismo curso.
+
+Respuesta esperada (sin contrasenas):
+  [
+    {
+      "id": 1,
+      "nombre": "Programacion",
+      "codigo": "PRG101",
+      "estudiantes": [
+        { "id": 1, "codigo": 1001.0,
+          "persona": { "id": 2, "nombres": "Ana",
+                       "apellidos": "Perez",
+                       "identificacion": "2222" } }
+      ],
+      "profesor": {
+        "id": 1,
+        "persona": { "id": 1, "nombres": "Cristian",
+                     "apellidos": "Zapata",
+                     "identificacion": "1111" }
+      }
+    }
+  ]
+
+
+---------------------------------------------------------------------
+5. RESULTADO OBTENIDO
+---------------------------------------------------------------------
+Con el usuario cdzapata, GET /cursos devolvio el curso
+"Programacion" con su profesor y su estudiante, sin error 500 y sin
+contrasenas en la respuesta. Esto confirma que las correcciones de
+la consulta, los DTO y el binding de MapStruct funcionan para la
+rama del profesor.
+
+Pendiente de verificar: la Prueba B con el usuario ana (rama del
+estudiante).
+
+
+---------------------------------------------------------------------
+6. CONCLUSION PARA EL INFORME
+---------------------------------------------------------------------
+GET /cursos respondia vacio porque el usuario de prueba no tenia
+cursos asociados. Ademas, el codigo tenia errores ocultos que habrian
+provocado un error 500 al agregar datos: referencias circulares en
+los DTO (que ademas exponian el hash de la contrasena), una consulta
+con joins implicitos y una configuracion incompleta de
+Lombok/MapStruct. Se corrigieron todos y se agregaron datos de
+prueba para validar el funcionamiento.
+
+
+---------------------------------------------------------------------
+7. PENDIENTES Y MEJORAS FUTURAS
+---------------------------------------------------------------------
+FRONTEND
+  - No hay un interceptor que envie el header
+    "Authorization: Bearer <token>" en las peticiones.
+  - El componente Cursos es solo un placeholder ("cursos works!").
+    Falta consumir GET /cursos y mostrar la lista.
+  - No hay guard de rutas: /cursos es accesible sin iniciar sesion.
+
+BACKEND
+  - El token JWT expira a los 5 minutos (plusMillis(300000)).
+    Pasado ese tiempo, /cursos responde 401 y hay que volver a
+    iniciar sesion.
+  - Estudiante.codigo es de tipo Double. Conviene cambiarlo a
+    String o Long.
+  - La base H2 es en memoria: los datos se pierden al reiniciar y
+    se recrean con InicializadorDatos.
+
+
+---------------------------------------------------------------------
+8. NOTAS
+---------------------------------------------------------------------
+  - Los puertos deben ser 8080 (backend) y 4200 (frontend): el
+    frontend llama a http://localhost:8080 y el CORS del backend
+    solo permite http://localhost:4200.
+  - Si el puerto 8080 queda ocupado, buscar el proceso con
+    "netstat -ano | findstr :8080" (Windows) y terminarlo con
+    "taskkill /PID <numero> /F".
+=====================================================================
